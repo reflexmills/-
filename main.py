@@ -25,9 +25,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Токены
-TELEGRAM_TOKEN = "7753901897:AAFPB3prAlijVliorhWgFzGZ1SNHNwNvmrs"
-CRYPTO_BOT_TOKEN = "409657:AA25nzFm1vBQtwPosEUKICmr51HcifTxzL8"
+import os
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения
+load_dotenv()
+
+# Получаем значения из .env
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+CRYPTO_BOT_TOKEN = os.getenv('CRYPTO_BOT_TOKEN')
 CRYPTO_BOT_API_URL = "https://pay.crypt.bot/api"
+ADMIN_IDS = [int(id) for id in os.getenv('ADMIN_IDS').split(',')]
+
+# Проверка, что токены загружены
+if not TELEGRAM_TOKEN or not CRYPTO_BOT_TOKEN:
+    raise ValueError("Не найдены необходимые токены в .env файле!")
 
 # Интервалы
 PAYMENT_CHECK_INTERVAL = 300  # 5 минут
