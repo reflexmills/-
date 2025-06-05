@@ -40,10 +40,6 @@ CRYPTO_BOT_TOKEN = os.getenv('CRYPTO_BOT_TOKEN')
 ADMIN_IDS = [int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()]
 CRYPTO_BOT_API_URL = "https://pay.crypt.bot/api"
 
-# Проверка обязательных переменных
-if not all([TELEGRAM_TOKEN, CRYPTO_BOT_TOKEN, ADMIN_IDS]):
-    raise ValueError("Необходимые переменные окружения не установлены!")
-
 # Интервалы
 PAYMENT_CHECK_INTERVAL = 300  # 5 минут
 KEEP_ALIVE_INTERVAL = 300    # 5 минут
