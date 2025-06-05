@@ -36,7 +36,6 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CRYPTO_BOT_TOKEN = os.getenv('CRYPTO_BOT_TOKEN')
 CRYPTO_BOT_API_URL = "https://pay.crypt.bot/api"
-ADMIN_IDS = [int(id) for id in os.getenv('ADMIN_IDS').split(',')]
 
 # Проверка, что токены загружены
 if not TELEGRAM_TOKEN or not CRYPTO_BOT_TOKEN:
