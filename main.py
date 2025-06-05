@@ -1,7 +1,14 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, CallbackContext
-from telegram.ext.filters import TEXT, COMMAND
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    ConversationHandler,
+    filters
+)
 from datetime import datetime, timedelta
 from calendar import monthrange
 import sqlite3
@@ -9,7 +16,6 @@ import uuid
 import requests
 import json
 import time
-import threading
 import sys
 import os
 from functools import wraps
@@ -23,28 +29,28 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(name)
 
-# Токены
-import os
+# Загрузка конфигурации
 from dotenv import load_dotenv
-
-# Загружаем переменные окружения
 load_dotenv()
 
-# Получаем значения из .env
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CRYPTO_BOT_TOKEN = os.getenv('CRYPTO_BOT_TOKEN')
+ADMIN_IDS = [int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()]
 CRYPTO_BOT_API_URL = "https://pay.crypt.bot/api"
 
-# Проверка, что токены загружены
-if not TELEGRAM_TOKEN or not CRYPTO_BOT_TOKEN:
-    raise ValueError("Не найдены необходимые токены в .env файле!")
+# Проверка обязательных переменных
+if not all([TELEGRAM_TOKEN, CRYPTO_BOT_TOKEN, ADMIN_IDS]):
+    raise ValueError("Необходимые переменные окружения не установлены!")
 
 # Интервалы
 PAYMENT_CHECK_INTERVAL = 300  # 5 минут
 KEEP_ALIVE_INTERVAL = 300    # 5 минут
 RESTART_DELAY = 10           # 10 секунд при ошибке
+
+# Состояния для ConversationHandler
+GET_CHANNEL, GET_DATE, GET_TIME, GET_DURATION, CONFIRM_ORDER, ADMIN_BALANCE_CHANGE = range(6)
 
 # ====================== БАЗА ДАННЫХ ======================
 def init_db():
@@ -85,10 +91,6 @@ def init_db():
             created_at TEXT,
             paid_at TEXT,
             FOREIGN KEY(user_id) REFERENCES users(user_id)
-        )''',
-        '''CREATE TABLE IF NOT EXISTS bot_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
         )'''
     ]
     
@@ -96,8 +98,7 @@ def init_db():
         cursor.execute(table)
     
     # Добавляем администраторов
-    admins = [6402443549]  # Ваш Telegram ID
-    for admin_id in admins:
+    for admin_id in ADMIN_IDS:
         cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (admin_id,))
     
     conn.commit()
@@ -110,7 +111,7 @@ def restart_bot():
     python = sys.executable
     os.execl(python, python, *sys.argv)
 
-def keep_alive(context: CallbackContext):
+async def keep_alive(context: ContextTypes.DEFAULT_TYPE):
     """Функция для поддержания активности бота"""
     try:
         conn = sqlite3.connect('bot.db')
@@ -125,18 +126,22 @@ def keep_alive(context: CallbackContext):
 def catch_errors(func):
     """Декоратор для перехвата ошибок"""
     @wraps(func)
-    def wrapped(*args, **kwargs):
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
-            return func(*args, **kwargs)
+            return await func(update, context)
         except Exception as e:
-            logging.error(f"Ошибка в функции {func.__name__}: {e}")
-            # Можно добавить отправку уведомления админу
+            logging.error(f"Ошибка в функции {func.name}: {e}")
+            if update and update.effective_chat:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ Произошла ошибка. Пожалуйста, попробуйте позже."
+                )
             raise
     return wrapped
 
 # ====================== CRYPTOBOT API ======================
 @catch_errors
-def create_crypto_invoice(user_id, amount):
+async def create_crypto_invoice(user_id: int, amount: float):
     headers = {
         'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
         'Content-Type': 'application/json'
@@ -147,7 +152,7 @@ def create_crypto_invoice(user_id, amount):
         "asset": "USDT",
         "description": f"Пополнение баланса для пользователя {user_id}",
         "paid_btn_name": "viewItem",
-        "paid_btn_url": f"https://t.me/{context.bot.username}",
+        "paid_btn_url": f"https://t.me/your_bot",
         "payload": str(user_id),
         "allow_comments": False,
         "allow_anonymous": False
@@ -163,7 +168,7 @@ def create_crypto_invoice(user_id, amount):
     return response.json().get('result')
 
 @catch_errors
-def check_crypto_payment(invoice_id):
+async def check_crypto_payment(invoice_id: str):
     headers = {
         'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN
     }
@@ -176,7 +181,7 @@ def check_crypto_payment(invoice_id):
     response.raise_for_status()
     return response.json().get('result')
 
-def check_pending_payments(context: CallbackContext):
+async def check_pending_payments(context: ContextTypes.DEFAULT_TYPE):
     """Проверяет неоплаченные счета"""
     try:
         conn = sqlite3.connect('bot.db')
@@ -185,20 +190,20 @@ def check_pending_payments(context: CallbackContext):
         payments = cursor.fetchall()
         
         for invoice_id, user_id, amount in payments:
-            payment = check_crypto_payment(invoice_id)
+            payment = await check_crypto_payment(invoice_id)
             if payment and payment['status'] == 'paid':
                 # Обновляем статус платежа
                 cursor.execute(
                     "UPDATE payments SET status = 'paid', paid_at = ? WHERE invoice_id = ?",
                     (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), invoice_id)
-                )
+                
                 # Пополняем баланс
                 cursor.execute(
                     "UPDATE users SET balance = balance + ? WHERE user_id = ?",
                     (amount, user_id))
                 
                 # Уведомляем пользователя
-                context.bot.send_message(
+                await context.bot.send_message(
                     chat_id=user_id,
                     text=f"✅ Ваш платеж на {amount} RUB подтвержден! Баланс пополнен."
                 )
@@ -212,7 +217,7 @@ def check_pending_payments(context: CallbackContext):
 
 # ====================== ОСНОВНЫЕ ФУНКЦИИ БОТА ======================
 @catch_errors
-def start(update: Update, context: CallbackContext) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     conn = sqlite3.connect('bot.db')
     cursor = conn.cursor()
@@ -233,17 +238,17 @@ def start(update: Update, context: CallbackContext) -> None:
         [InlineKeyboardButton("Сделать заказ", callback_data='make_order')],
     ]
     
-    if is_admin(user.id):
+    if user.id in ADMIN_IDS:
         keyboard.append([InlineKeyboardButton("Админ раздел", callback_data='admin_panel')])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    update.message.reply_text(
+    await update.message.reply_text(
         f"Здравствуйте, {user.first_name}! Я бот для заказа услуг для стримов. Выберите действие:",
         reply_markup=reply_markup
     )
 
-def is_admin(user_id):
+def is_admin(user_id: int) -> bool:
     conn = sqlite3.connect('bot.db')
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM admins WHERE user_id = ?", (user_id,))
@@ -251,62 +256,42 @@ def is_admin(user_id):
     conn.close()
     return result
 
-    # Проверяем, является ли пользователь администратором
-    if is_admin(user.id):
-        keyboard.append([InlineKeyboardButton("Админ раздел", callback_data='admin_panel')])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    update.message.reply_text(
-        f"Привет, {user.first_name}! Я бот для заказа услуг для стримов. Выберите действие:",
-        reply_markup=reply_markup
-    )
-
-# Проверка на администратора
-def is_admin(user_id):
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM admins WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone() is not None
-    conn.close()
-    return result
-
-# Обработка нажатий на кнопки
-def button(update: Update, context: CallbackContext) -> None:
+@catch_errors
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    query.answer()
+    await query.answer()
     
     data = query.data
     
     if data == 'profile':
-        show_profile(update, context)
+        await show_profile(update, context)
     elif data == 'help':
-        show_help(update, context)
+        await show_help(update, context)
     elif data == 'make_order':
-        choose_platform(update, context)
+        await choose_platform(update, context)
     elif data == 'admin_panel':
-        admin_panel(update, context)
+        await admin_panel(update, context)
     elif data == 'back_to_menu':
-        start(update, context)
+        await start(update, context)
     elif data.startswith('platform_'):
         context.user_data['platform'] = data.split('_')[1]
-        choose_service(update, context)
+        await choose_service(update, context)
     elif data.startswith('service_'):
         context.user_data['service'] = data.split('_')[1]
-        ask_channel(update, context)
+        return await ask_channel(update, context)
     elif data.startswith('calendar_'):
-        handle_calendar(update, context, data)
+        return await handle_calendar(update, context, data)
     elif data == 'confirm_order':
-        confirm_order(update, context)
+        await confirm_order(update, context)
     elif data == 'pay_crypto':
-        process_crypto_payment(update, context)
+        await process_crypto_payment(update, context)
     elif data == 'pay_card':
-        process_card_payment(update, context)
+        await process_card_payment(update, context)
     elif data == 'topup_balance':
-        topup_balance(update, context)
+        await topup_balance(update, context)
     elif data.startswith('admin_'):
-        handle_admin_actions(update, context, data)
-
+        await handle_admin_actions(update, context, data)
+        
 # Показать профиль
 def show_profile(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -880,52 +865,47 @@ def setup_jobs(updater):
         first=0
     )
 
-def main():
+async def main():
     """Основная функция запуска бота"""
     init_db()
     
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    
+    # ConversationHandler для многошаговых взаимодействий
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button)],
+        states={
+            GET_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel)],
+            GET_DATE: [CallbackQueryHandler(handle_calendar)],
+            GET_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
+            GET_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_duration)],
+            CONFIRM_ORDER: [CallbackQueryHandler(confirm_order)],
+            ADMIN_BALANCE_CHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_change)]
+        },
+        fallbacks=[CommandHandler("start", start)]
+    )
+    application.add_handler(conv_handler)
+    
+    # Настройка периодических задач
+    job_queue = application.job_queue
+    if job_queue:
+        job_queue.run_repeating(check_pending_payments, interval=PAYMENT_CHECK_INTERVAL, first=10)
+        job_queue.run_repeating(keep_alive, interval=KEEP_ALIVE_INTERVAL, first=10)
+    
+    # Запуск бота
+    await application.run_polling()
+
+if __name__ == '__main__':
     while True:
         try:
-            updater = Updater(TELEGRAM_TOKEN, use_context=True)
-            dp = updater.dispatcher
-            
-            # Обработчики команд
-            dp.add_handler(CommandHandler("start", start))
-            dp.add_handler(CallbackQueryHandler(button))
-            
-            # Обработчики сообщений
-            conv_handler = ConversationHandler(
-                entry_points=[CallbackQueryHandler(button)],
-                states={
-                    'GET_CHANNEL': [MessageHandler(Filters.text & ~Filters.command, get_channel)],
-                    'GET_DATE': [CallbackQueryHandler(button)],
-                    'GET_TIME': [MessageHandler(Filters.text & ~Filters.command, get_time)],
-                    'GET_DURATION': [MessageHandler(Filters.text & ~Filters.command, get_duration)],
-                    'CONFIRM_ORDER': [CallbackQueryHandler(button)],
-                    'ADMIN_BALANCE_CHANGE': [MessageHandler(Filters.text & ~Filters.command, admin_balance_change)],
-                    'ADMIN_ADD': [MessageHandler(Filters.text & ~Filters.command, process_admin_add)]
-                },
-                fallbacks=[CommandHandler("start", start)]
-            )
-            dp.add_handler(conv_handler)
-            
-            # Настройка периодических задач
-            setup_jobs(updater)
-            
-            # Запуск бота
-            updater.start_polling()
-            logging.info("Бот успешно запущен")
-            updater.idle()
-            
+            import asyncio
+            asyncio.run(main())
         except Exception as e:
             logging.critical(f"Критическая ошибка: {e}")
             logging.info(f"Повторная попытка через {RESTART_DELAY} секунд...")
-            
-            if 'updater' in locals() and updater.running:
-                updater.stop()
-            
             time.sleep(RESTART_DELAY)
             restart_bot()
-
-if __name__ == '__main__':
-    main()
