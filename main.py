@@ -191,7 +191,7 @@ def check_pending_payments(context: CallbackContext):
                 cursor.execute(
                     "UPDATE payments SET status = 'paid', paid_at = ? WHERE invoice_id = ?",
                     (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), invoice_id)
-                
+                )
                 # Пополняем баланс
                 cursor.execute(
                     "UPDATE users SET balance = balance + ? WHERE user_id = ?",
