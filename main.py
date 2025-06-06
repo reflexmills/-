@@ -836,7 +836,7 @@ conv_handler = ConversationHandler(
     per_chat=True,
     per_user=True
 )
-    application.add_handler(conv_handler)
+application.add_handler(conv_handler)
     
     # Регистрация обработчика кнопок
     application.add_handler(CallbackQueryHandler(button))
