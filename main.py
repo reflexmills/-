@@ -806,7 +806,6 @@ async def main():
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button))
-    application.add_handler(conv_handler)  # Твой ConversationHandler
     
     # Планировщик задач (встроенный в PTB)
     application.job_queue.run_repeating(
