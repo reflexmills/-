@@ -695,9 +695,20 @@ async def get_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ЗАПУСК БОТА И ВЕБ-СЕРВЕРА
 # =============================================
 
+def find_free_port():
+    """Находит свободный порт начиная с 2500"""
+    port = 2500
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('0.0.0.0', port))
+                return port
+            except OSError:
+                port += 1
+
 def run_web_server():
-    """Запуск Flask-сервера для Render"""
-    app = Flask(__name__)
+    """Запуск Flask-сервера для Render с автоматическим выбором свободного порта"""
+    app = Flask(name)
 
     @app.route('/')
     def home():
@@ -711,7 +722,8 @@ def run_web_server():
         conn.close()
         return "OK", 200
 
-    port = int(os.environ.get("PORT", 2500))
+    port = find_free_port()
+    print(f"Starting server on port {port}")  # Для отладки
     app.run(host="0.0.0.0", port=port)
 
 def main():
