@@ -794,68 +794,77 @@ async def admin_balance_change(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
     except (ValueError, IndexError):
         await update.message.reply_text("Неверный формат. Введите ID пользователя и сумму изменения (например: 123456789 +500):")
+import asyncio
+from contextlib import suppress
+
 async def main():
     """Основная асинхронная функция бота"""
-    try:
-        init_db()
-        
-        application = (
-            Application.builder()
-            .token(TELEGRAM_TOKEN)
-            .job_queue(JobQueue())
-            .build()
-        )
-        
-        # Регистрация всех обработчиков
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button))
-        
-        conv_handler = ConversationHandler(
-            entry_points=[CommandHandler("start", start)],
-            states={
-                GET_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel)],
-                GET_DATE: [CallbackQueryHandler(handle_calendar)],
-                GET_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
-                GET_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_duration)],
-                CONFIRM_ORDER: [CallbackQueryHandler(confirm_order)],
-                ADMIN_BALANCE_CHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_change)]
-            },
-            fallbacks=[CommandHandler("start", start)],
-            per_message=False
-        )
-        application.add_handler(conv_handler)
-        
-        # Планировщик задач
-        application.job_queue.run_repeating(
-            check_pending_payments,
-            interval=PAYMENT_CHECK_INTERVAL,
-            first=10
-        )
-        application.job_queue.run_repeating(
-            keep_alive,
-            interval=KEEP_ALIVE_INTERVAL,
-            first=10
-        )
-        
-        # Запуск бота с обработкой ошибок
-        await application.run_polling()
-        
-    except Exception as e:
-        logging.critical(f"Ошибка в главной функции: {e}")
-        raise
+    init_db()
+    
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .job_queue(JobQueue())
+        .build()
+    )
+    
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button))
+    
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            GET_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel)],
+            GET_DATE: [CallbackQueryHandler(handle_calendar)],
+            GET_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
+            GET_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_duration)],
+            CONFIRM_ORDER: [CallbackQueryHandler(confirm_order)],
+            ADMIN_BALANCE_CHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_change)]
+        },
+        fallbacks=[CommandHandler("start", start)],
+        per_message=False
+    )
+    application.add_handler(conv_handler)
+    
+    # Планировщик задач
+    application.job_queue.run_repeating(
+        check_pending_payments,
+        interval=PAYMENT_CHECK_INTERVAL,
+        first=10
+    )
+    application.job_queue.run_repeating(
+        keep_alive,
+        interval=KEEP_ALIVE_INTERVAL,
+        first=10
+    )
+    
+    # Запуск бота с правильным управлением event loop
+    async with application:
+        await application.start()
+        await application.updater.start_polling()
+        await application.stop()
 
 def run_bot():
     """Функция для запуска и перезапуска бота"""
     while True:
         try:
-            asyncio.run(main())
-        except KeyboardInterrupt:
-            logging.info("Бот остановлен пользователем")
-            break
+            # Создаем новую event loop для каждого запуска
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            with suppress(asyncio.CancelledError, KeyboardInterrupt):
+                loop.run_until_complete(main())
+                
         except Exception as e:
-            logging.error(f"Критическая ошибка: {e}")
+            logging.critical(f"Критическая ошибка: {e}")
             logging.info(f"Перезапуск через {RESTART_DELAY} сек...")
             time.sleep(RESTART_DELAY)
+            
+        finally:
+            # Аккуратно закрываем event loop
+            with suppress(Exception):
+                loop.close()
 
 if __name__ == '__main__':
     run_bot()
