@@ -722,7 +722,7 @@ def run_web_server():
         conn.close()
         return "OK", 200
 
-    port = int(os.environ.get("PORT", 50000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
     
 def main():
