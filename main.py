@@ -797,8 +797,11 @@ async def admin_balance_change(update: Update, context: ContextTypes.DEFAULT_TYP
     except (ValueError, IndexError):
         await update.message.reply_text("Неверный формат. Введите ID пользователя и сумму изменения (например: 123456789 +500):")
 
+from flask import Flask
+import threading
+
 def run_web_server():
-    app = Flask(name)
+    app = Flask(__name__)
 
     @app.route('/')
     def index():
@@ -806,21 +809,19 @@ def run_web_server():
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    
+
 async def main():
     init_db()
-    
+
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .build()
     )
-    
-    # Регистрация обработчиков
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button))
-    
-    # Планировщик задач (встроенный в PTB)
+
     application.job_queue.run_repeating(
         check_pending_payments,
         interval=PAYMENT_CHECK_INTERVAL,
@@ -831,13 +832,16 @@ async def main():
         interval=KEEP_ALIVE_INTERVAL,
         first=10
     )
-    
+
     try:
-        await application.run_polling()  # Запуск с автоматическим управлением polling
+        await application.run_polling()
     finally:
-        await application.stop()  # Корректная остановка
+        await application.stop()
 
 def run_bot():
+    # Запускаем фейковый веб-сервер, чтобы Render видел открытый порт
+    threading.Thread(target=run_web_server).start()
+
     while True:
         try:
             asyncio.run(main())
