@@ -807,7 +807,7 @@ async def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button))
     
-   conv_handler = ConversationHandler(
+conv_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
         GET_CHANNEL: [
@@ -834,10 +834,10 @@ async def main():
     per_chat=True,
     per_user=True
 )
-    application.add_handler(conv_handler)
+application.add_handler(conv_handler)
     
     # Настройка периодических задач
-    if application.job_queue:
+if application.job_queue:
         application.job_queue.run_repeating(
             check_pending_payments,
             interval=PAYMENT_CHECK_INTERVAL,
