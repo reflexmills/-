@@ -148,7 +148,7 @@ def init_db():
         "INSERT OR IGNORE INTO system (key, value) VALUES ('last_restart', ?)",
         (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
     
-    conn.commit()
+    conn.commit(),
     conn.close()
 
 def catch_errors(func):
