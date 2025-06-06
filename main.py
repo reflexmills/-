@@ -796,11 +796,10 @@ async def main():
     """Основная функция запуска бота"""
     init_db()
     
-    # Инициализация с JobQueue
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
-        .job_queue(JobQueue())  # Явное создание JobQueue
+        .job_queue(JobQueue())
         .build()
     )
     
@@ -808,18 +807,21 @@ async def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button))
     
-    # ConversationHandler
+    # ConversationHandler с явными настройками
     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button)],
+        entry_points=[CommandHandler("start", start)],
         states={
             GET_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel)],
-            GET_DATE: [CallbackQueryHandler(handle_calendar)],
+            GET_DATE: [CallbackQueryHandler(handle_calendar, pattern="^calendar_")],
             GET_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
             GET_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_duration)],
-            CONFIRM_ORDER: [CallbackQueryHandler(confirm_order)],
+            CONFIRM_ORDER: [CallbackQueryHandler(confirm_order, pattern="^confirm_order$")],
             ADMIN_BALANCE_CHANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_change)]
         },
-        fallbacks=[CommandHandler("start", start)]
+        fallbacks=[CommandHandler("start", start)],
+        per_message=False,
+        per_chat=True,
+        per_user=True
     )
     application.add_handler(conv_handler)
     
