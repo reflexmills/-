@@ -146,9 +146,9 @@ def init_db():
     # Инициализация системных настроек
     cursor.execute(
         "INSERT OR IGNORE INTO system (key, value) VALUES ('last_restart', ?)",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
-    
-    conn.commit(),
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
+    )
+    conn.commit()
     conn.close()
 
 def catch_errors(func):
@@ -205,7 +205,7 @@ async def get_usdt_rate():
         cursor = conn.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO system (key, value) VALUES (?, ?)",
-            ('usdt_rate', str(usdt_rate))
+            ('usdt_rate', str(usdt_rate)))
         conn.commit()
         conn.close()
     except Exception as e:
