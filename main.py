@@ -842,12 +842,12 @@ application.add_handler(conv_handler)
 application.add_handler(CallbackQueryHandler(button))
     
     # Настройка периодических задач
-    application.job_queue.run_repeating(
+application.job_queue.run_repeating(
         check_pending_payments,
         interval=PAYMENT_CHECK_INTERVAL,
         first=10
     )
-    application.job_queue.run_repeating(
+application.job_queue.run_repeating(
         keep_alive,
         interval=KEEP_ALIVE_INTERVAL,
         first=10
