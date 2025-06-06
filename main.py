@@ -815,7 +815,6 @@ def run_web_server():
     app.run(host="0.0.0.0", port=port)
 
 def run_bot():
-    from handlers import start, button  # или импортируй то, что тебе нужно
 
     from config import (
         TELEGRAM_TOKEN,
