@@ -815,17 +815,6 @@ def run_web_server():
     app.run(host="0.0.0.0", port=port)
 
 def run_bot():
-
-    from config import (
-        TELEGRAM_TOKEN,
-        init_db,
-        check_pending_payments,
-        keep_alive,
-        PAYMENT_CHECK_INTERVAL,
-        KEEP_ALIVE_INTERVAL,
-    )
-
-    # Запускаем Flask в отдельном потоке
     threading.Thread(target=run_web_server).start()
 
     init_db()
@@ -836,16 +825,21 @@ def run_bot():
         .build()
     )
 
-    # Обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button))
 
-    # Планировщик
-    application.job_queue.run_repeating(check_pending_payments, interval=PAYMENT_CHECK_INTERVAL, first=10)
-    application.job_queue.run_repeating(keep_alive, interval=KEEP_ALIVE_INTERVAL, first=10)
+    application.job_queue.run_repeating(
+        check_pending_payments,
+        interval=PAYMENT_CHECK_INTERVAL,
+        first=10
+    )
+    application.job_queue.run_repeating(
+        keep_alive,
+        interval=KEEP_ALIVE_INTERVAL,
+        first=10
+    )
 
-    # ⛔️ ВНИМАНИЕ: НЕ используем asyncio.run() или await
     application.run_polling()
-
+    
 if __name__ == '__main__':
     run_bot()
