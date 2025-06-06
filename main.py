@@ -44,6 +44,10 @@ CRYPTO_BOT_TOKEN = os.getenv('CRYPTO_BOT_TOKEN')
 ADMIN_IDS = [int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()]
 CRYPTO_BOT_API_URL = "https://pay.crypt.bot/api"
 
+print(f"TELEGRAM_TOKEN: {TELEGRAM_TOKEN}")
+if not TELEGRAM_TOKEN:
+    logging.critical("TELEGRAM_TOKEN не установлен!")
+    sys.exit(1)
 # Проверка обязательных переменных
 if not all([TELEGRAM_TOKEN, CRYPTO_BOT_TOKEN, ADMIN_IDS]):
     raise ValueError("Необходимые переменные окружения не установлены!")
