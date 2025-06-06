@@ -1,5 +1,5 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -12,19 +12,14 @@ from telegram.ext import (
 from datetime import datetime, timedelta
 from calendar import monthrange
 from telegram.ext import JobQueue
-from flask import Flask
-import threading
 import sqlite3
 import uuid
 import requests
 import json
-import time
-import sys
 import os
-import asyncio
-from telegram.ext import Application, JobQueue
-from functools import wraps
 from dotenv import load_dotenv
+from PIL import Image
+import io
 
 # Настройка логгирования
 logging.basicConfig(
@@ -36,6 +31,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
 # Загрузка конфигурации
 load_dotenv()
 
@@ -43,6 +39,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 CRYPTO_BOT_TOKEN = os.getenv('CRYPTO_BOT_TOKEN')
 ADMIN_IDS = [int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()]
 CRYPTO_BOT_API_URL = "https://pay.crypt.bot/api"
+EXCHANGE_RATE_URL = "https://api.exchangerate-api.com/v4/latest/USD"
 
 # Проверка обязательных переменных
 if not all([TELEGRAM_TOKEN, CRYPTO_BOT_TOKEN, ADMIN_IDS]):
@@ -51,10 +48,13 @@ if not all([TELEGRAM_TOKEN, CRYPTO_BOT_TOKEN, ADMIN_IDS]):
 # Интервалы
 PAYMENT_CHECK_INTERVAL = 300  # 5 минут
 KEEP_ALIVE_INTERVAL = 300    # 5 минут
-RESTART_DELAY = 10           # 10 секунд при ошибке
 
 # Состояния для ConversationHandler
-GET_CHANNEL, GET_DATE, GET_TIME, GET_DURATION, CONFIRM_ORDER, ADMIN_BALANCE_CHANGE = range(6)
+GET_CHANNEL, GET_DATE, GET_TIME, GET_DURATION, CONFIRM_ORDER, ADMIN_BALANCE_CHANGE, GET_AMOUNT = range(7)
+
+# Курс USDT к рублю (будет обновляться)
+usdt_rate = 80.0  # начальное значение
+
 def init_db():
     conn = sqlite3.connect('bot.db')
     cursor = conn.cursor()
@@ -63,8 +63,11 @@ def init_db():
         '''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
+            first_name TEXT,
+            last_name TEXT,
             balance REAL DEFAULT 0,
-            registration_date TEXT
+            registration_date TEXT,
+            last_activity TEXT
         )''',
         '''CREATE TABLE IF NOT EXISTS orders (
             order_id TEXT PRIMARY KEY,
@@ -105,24 +108,18 @@ def init_db():
     
     conn.commit()
     conn.close()
-    
-def restart_bot():
-    """Перезапускает бота"""
-    logging.info("Перезапуск бота...")
-    python = sys.executable
-    os.execl(python, python, *sys.argv)
 
-async def keep_alive(context: ContextTypes.DEFAULT_TYPE):
-    """Функция для поддержания активности бота"""
+async def get_usdt_rate():
+    """Получает текущий курс USDT к рублю"""
+    global usdt_rate
     try:
-        conn = sqlite3.connect('bot.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        conn.close()
-        logging.info("Бот активен, проверка БД успешна")
+        response = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=USDTRUB")
+        data = response.json()
+        usdt_rate = float(data['price'])
+        logger.info(f"Обновлен курс USDT: {usdt_rate} RUB")
     except Exception as e:
-        logging.error(f"Ошибка проверки активности: {e}")
-        restart_bot()
+        logger.error(f"Ошибка при получении курса USDT: {e}")
+        # Используем предыдущее значение, если не удалось обновить
 
 def catch_errors(func):
     """Декоратор для перехвата ошибок"""
@@ -139,15 +136,20 @@ def catch_errors(func):
                 )
             raise
     return wrapped
+
 @catch_errors
-async def create_crypto_invoice(user_id: int, amount: float):
+async def create_crypto_invoice(user_id: int, amount_rub: float):
+    """Создает счет в криптовалюте по сумме в рублях"""
+    await get_usdt_rate()  # Обновляем курс перед созданием счета
+    amount_usdt = round(amount_rub / usdt_rate, 2)
+    
     headers = {
         'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN,
         'Content-Type': 'application/json'
     }
     
     payload = {
-        "amount": amount,
+        "amount": amount_usdt,
         "asset": "USDT",
         "description": f"Пополнение баланса для пользователя {user_id}",
         "paid_btn_name": "viewItem",
@@ -167,53 +169,6 @@ async def create_crypto_invoice(user_id: int, amount: float):
     return response.json().get('result')
 
 @catch_errors
-async def check_crypto_payment(invoice_id: str):
-    headers = {
-        'Crypto-Pay-API-Token': CRYPTO_BOT_TOKEN
-    }
-    
-    response = requests.get(
-        f"{CRYPTO_BOT_API_URL}/invoices/{invoice_id}",
-        headers=headers,
-        timeout=10
-    )
-    response.raise_for_status()
-    return response.json().get('result')
-
-async def check_pending_payments(context: ContextTypes.DEFAULT_TYPE):
-    """Проверяет неоплаченные счета"""
-    try:
-        conn = sqlite3.connect('bot.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT invoice_id, user_id, amount FROM payments WHERE status = 'created'")
-        payments = cursor.fetchall()
-        
-        for invoice_id, user_id, amount in payments:
-            payment = await check_crypto_payment(invoice_id)
-            if payment and payment['status'] == 'paid':
-                # Обновляем статус платежа
-                cursor.execute(
-                    "UPDATE payments SET status = 'paid', paid_at = ? WHERE invoice_id = ?",
-                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), invoice_id)
-                )
-                # Пополняем баланс
-                cursor.execute(
-                    "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-                    (amount, user_id))
-                
-                # Уведомляем пользователя
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"✅ Ваш платеж на {amount} RUB подтвержден! Баланс пополнен."
-                )
-                
-                conn.commit()
-                logging.info(f"Подтвержден платеж {invoice_id} для пользователя {user_id}")
-        
-        conn.close()
-    except Exception as e:
-        logging.error(f"Ошибка при проверке платежей: {e}")
-@catch_errors
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     conn = sqlite3.connect('bot.db')
@@ -222,126 +177,118 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cursor.execute("SELECT * FROM users WHERE user_id = ?", (user.id,))
     if not cursor.fetchone():
         cursor.execute(
-            "INSERT INTO users (user_id, username, registration_date) VALUES (?, ?, ?)",
-            (user.id, user.username, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            "INSERT INTO users (user_id, username, first_name, last_name, registration_date, last_activity) VALUES (?, ?, ?, ?, ?, ?)",
+            (user.id, user.username, user.first_name, user.last_name, 
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         )
-        conn.commit()
+    else:
+        cursor.execute(
+            "UPDATE users SET last_activity = ? WHERE user_id = ?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user.id)
+        )
     
+    conn.commit()
     conn.close()
     
-    keyboard = [
-        [InlineKeyboardButton("Мой профиль", callback_data='profile')],
-        [InlineKeyboardButton("Помощь", callback_data='help')],
-        [InlineKeyboardButton("Сделать заказ", callback_data='make_order')],
-    ]
-    
-    if user.id in ADMIN_IDS:
-        keyboard.append([InlineKeyboardButton("Админ раздел", callback_data='admin_panel')])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"Здравствуйте, {user.first_name}! Я бот для заказа услуг для стримов. Выберите действие:",
-        reply_markup=reply_markup
-    )
+    # Отправляем приветственное фото
+    with open('welcome.jpg', 'rb') as photo:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=photo,
+            caption=f"🌟 Добро пожаловать, {user.first_name}!\n\n"
+                    "Я бот для заказа услуг для стримов. Выберите действие:",
+            reply_markup=ReplyKeyboardMarkup(
+                [
+                    ["Мой профиль", "Помощь"],
+                    ["Сделать заказ", "Пополнить баланс"]
+                ],
+                resize_keyboard=True
+            )
+        )
 
-def is_admin(user_id: int) -> bool:
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM admins WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone() is not None
-    conn.close()
-    return result
-
-@catch_errors
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    
-    if data == 'profile':
-        await show_profile(update, context)
-    elif data == 'help':
-        await show_help(update, context)
-    elif data == 'make_order':
-        await choose_platform(update, context)
-    elif data == 'admin_panel':
-        await admin_panel(update, context)
-    elif data == 'back_to_menu':
-        await start(update, context)
-    elif data.startswith('platform_'):
-        context.user_data['platform'] = data.split('_')[1]
-        await choose_service(update, context)
-    elif data.startswith('service_'):
-        context.user_data['service'] = data.split('_')[1]
-        return await ask_channel(update, context)
-    elif data.startswith('calendar_'):
-        return await handle_calendar(update, context, data)
-    elif data == 'confirm_order':
-        await confirm_order(update, context)
-    elif data == 'pay_crypto':
-        await process_crypto_payment(update, context)
-    elif data == 'pay_card':
-        await process_card_payment(update, context)
-    elif data == 'topup_balance':
-        await topup_balance(update, context)
-    elif data.startswith('admin_'):
-        await handle_admin_actions(update, context, data)
 @catch_errors
 async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    
+    user = update.effective_user
     conn = sqlite3.connect('bot.db')
     cursor = conn.cursor()
     
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-    balance = cursor.fetchone()[0]
+    cursor.execute("SELECT balance, registration_date FROM users WHERE user_id = ?", (user.id,))
+    balance, reg_date = cursor.fetchone()
     
-    cursor.execute("SELECT COUNT(*) FROM orders WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT COUNT(*) FROM orders WHERE user_id = ?", (user.id,))
     orders_count = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT SUM(amount) FROM orders WHERE user_id = ? AND status = 'completed'", (user.id,))
+    total_spent = cursor.fetchone()[0] or 0
     
     conn.close()
     
-    keyboard = [
-        [InlineKeyboardButton("Пополнить баланс", callback_data='topup_balance')],
-        [InlineKeyboardButton("Назад", callback_data='back_to_menu')]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
+    await update.message.reply_text(
         text=f"📊 Ваш профиль:\n\n"
-             f"💰 Баланс: {balance} руб\n"
-             f"🛒 Всего заказов: {orders_count}\n\n"
-             f"Выберите действие:",
-        reply_markup=reply_markup
+             f"👤 Имя: {user.first_name or ''} {user.last_name or ''}\n"
+             f"🆔 ID: {user.id}\n"
+             f"📅 Дата регистрации: {reg_date}\n\n"
+             f"💰 Баланс: {balance:.2f} руб\n"
+             f"🛒 Всего заказов: {orders_count}\n"
+             f"💸 Всего потрачено: {total_spent:.2f} руб",
+        reply_markup=ReplyKeyboardMarkup(
+            [
+                ["Пополнить баланс"],
+                ["Назад в меню"]
+            ],
+            resize_keyboard=True
+        )
     )
 
 @catch_errors
 async def topup_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    keyboard = [
-        [InlineKeyboardButton("Криптовалюта (CryptoBot)", callback_data='pay_crypto')],
-        [InlineKeyboardButton("Банковская карта", callback_data='pay_card')],
-        [InlineKeyboardButton("Назад", callback_data='profile')]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text="💰 Пополнение баланса\n\n"
-             "Выберите способ оплаты:",
-        reply_markup=reply_markup
+    await update.message.reply_text(
+        text="💰 Введите сумму пополнения в рублях:",
+        reply_markup=ReplyKeyboardMarkup(
+            [["500", "1000", "2000"], ["Назад в меню"]],
+            resize_keyboard=True
+        )
     )
+    return GET_AMOUNT
+
+@catch_errors
+async def get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text)
+        if amount < 100:
+            await update.message.reply_text("Минимальная сумма пополнения - 100 руб. Введите сумму еще раз:")
+            return GET_AMOUNT
+        
+        context.user_data['topup_amount'] = amount
+        
+        await get_usdt_rate()  # Обновляем курс
+        amount_usdt = round(amount / usdt_rate, 2)
+        
+        keyboard = [
+            [InlineKeyboardButton(f"Оплатить {amount} руб (~{amount_usdt} USDT)", callback_data='pay_crypto')],
+            [InlineKeyboardButton("Отмена", callback_data='cancel_payment')]
+        ]
+        
+        await update.message.reply_text(
+            text=f"💰 Сумма пополнения: {amount} руб (~{amount_usdt} USDT)\n"
+                 f"📊 Текущий курс: 1 USDT = {usdt_rate:.2f} руб\n\n"
+                 "Выберите способ оплаты:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        return CONFIRM_ORDER
+    except ValueError:
+        await update.message.reply_text("Пожалуйста, введите корректную сумму:")
+        return GET_AMOUNT
 
 @catch_errors
 async def process_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
+    
     user_id = query.from_user.id
-    amount = 1000  # Можно сделать выбор суммы
+    amount = context.user_data['topup_amount']
     
     invoice = await create_crypto_invoice(user_id, amount)
     if not invoice:
@@ -354,67 +301,46 @@ async def process_crypto_payment(update: Update, context: ContextTypes.DEFAULT_T
     cursor.execute(
         "INSERT INTO payments (invoice_id, user_id, amount, created_at) VALUES (?, ?, ?, ?)",
         (invoice['invoice_id'], user_id, amount, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    )
     conn.commit()
     conn.close()
     
-    keyboard = [
-        [InlineKeyboardButton("Проверить оплату", callback_data=f'check_payment_{invoice["invoice_id"]}')],
-        [InlineKeyboardButton("Назад", callback_data='profile')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await query.edit_message_text(
         text=f"💳 Счет для оплаты создан\n\n"
-             f"Сумма: {amount} RUB\n"
-             f"Адрес для оплаты: {invoice['pay_url']}\n\n"
-             f"После оплаты нажмите кнопку 'Проверить оплату'.",
-        reply_markup=reply_markup
-    )
-@catch_errors
-async def process_card_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    await query.edit_message_text(
-        text="Для оплаты банковской картой, пожалуйста, свяжитесь с менеджером @manager_username\n\n"
-             "Укажите сумму пополнения и ваш ID: " + str(query.from_user.id)
-    )
-
-@catch_errors
-async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    keyboard = [[InlineKeyboardButton("Назад", callback_data='back_to_menu')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text="📞 Помощь\n\n"
-             "Если у вас возникли вопросы или проблемы, свяжитесь с нашим менеджером: @manager_username\n\n"
-             "Мы работаем круглосуточно.",
-        reply_markup=reply_markup
+             f"Сумма: {amount} руб (~{round(amount / usdt_rate, 2)} USDT)\n"
+             f"📊 Курс: 1 USDT = {usdt_rate:.2f} руб\n\n"
+             f"Ссылка для оплаты: {invoice['pay_url']}\n\n"
+             f"После оплаты баланс будет пополнен автоматически в течение 5 минут.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Проверить оплату", callback_data=f'check_payment_{invoice["invoice_id"]}')],
+            [InlineKeyboardButton("Назад в меню", callback_data='back_to_menu')]
+        ])
     )
 
 @catch_errors
 async def choose_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    keyboard = [
-        [InlineKeyboardButton("🟣 Twitch", callback_data='platform_twitch')],
-        [InlineKeyboardButton("🟢 Kick", callback_data='platform_kick')],
-        [InlineKeyboardButton("🔴 YouTube", callback_data='platform_youtube')],
-        [InlineKeyboardButton("Назад", callback_data='back_to_menu')]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text="🗂 Пожалуйста, выберите платформу:",
-        reply_markup=reply_markup
-    )
+    # Отправляем фото с выбором платформы
+    with open('platforms.jpg', 'rb') as photo:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=photo,
+            caption="Выберите платформу для заказа:",
+            reply_markup=ReplyKeyboardMarkup(
+                [
+                    ["Twitch", "YouTube", "Kick"],
+                    ["Назад в меню"]
+                ],
+                resize_keyboard=True
+            )
+        )
+
 @catch_errors
-async def choose_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    platform = context.user_data['platform']
+async def get_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    platform = update.message.text.lower()
+    if platform not in ['twitch', 'youtube', 'kick']:
+        await update.message.reply_text("Пожалуйста, выберите платформу из предложенных:")
+        return
+    
+    context.user_data['platform'] = platform
     
     prices = {
         'twitch': {'chat_ru': 250, 'chat_eng': 400, 'viewers': 1, 'followers': 1},
@@ -423,34 +349,32 @@ async def choose_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     
     keyboard = [
-        [InlineKeyboardButton(f"💬 Живой чат (RU) - {prices[platform]['chat_ru']} руб/час", callback_data='service_chat_ru')],
-        [InlineKeyboardButton(f"💬 Живой чат (ENG) - {prices[platform]['chat_eng']} руб/час", callback_data='service_chat_eng')],
+        [InlineKeyboardButton(f"💬 Чат (RU) - {prices[platform]['chat_ru']} руб/час", callback_data='service_chat_ru')],
+        [InlineKeyboardButton(f"💬 Чат (ENG) - {prices[platform]['chat_eng']} руб/час", callback_data='service_chat_eng')],
         [InlineKeyboardButton(f"👀 Зрители - {prices[platform]['viewers']} руб/час", callback_data='service_viewers')],
-        [InlineKeyboardButton(f"👥 Фолловеры - {prices[platform]['followers']} руб/час", callback_data='service_followers')],
-        [InlineKeyboardButton("Назад", callback_data='make_order')]
+        [InlineKeyboardButton(f"👥 Подписчики - {prices[platform]['followers']} руб/час", callback_data='service_followers')],
+        [InlineKeyboardButton("Назад", callback_data='back_to_platforms')]
     ]
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    platform_name = {
-        'twitch': '🟣 TWITCH',
-        'kick': '🔴 KICK',
-        'youtube': '📺 YOUTUBE'
-    }.get(platform, platform.upper())
-    
-    await query.edit_message_text(
-        text=f"Платформа: {platform_name}\n\n"
-             "🗂 Пожалуйста, выберите нужную услугу:",
-        reply_markup=reply_markup
+    await update.message.reply_text(
+        text=f"Вы выбрали платформу: {platform.capitalize()}\n\n"
+             "Теперь выберите услугу:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 @catch_errors
 async def ask_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    context.user_data['service'] = query.data.split('_')[1]
+    await query.answer()
+    
+    service = query.data.split('_')[1]
+    context.user_data['service'] = service
     
     await query.edit_message_text(
-        text="🗯️ Отправьте ссылку или юзернейм Вашего канала:"
+        text="Введите юзернейм или ссылку на ваш канал:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Назад", callback_data='back_to_services')]
+        ])
     )
     
     return GET_CHANNEL
@@ -461,8 +385,8 @@ async def get_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['channel'] = channel
     
     await show_calendar(update, context)
-    
     return GET_DATE
+
 @catch_errors
 async def show_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE, month=None, year=None):
     now = datetime.now()
@@ -506,18 +430,19 @@ async def show_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE, mont
     if day_buttons:
         keyboard.append(day_buttons)
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard.append([InlineKeyboardButton("Назад", callback_data='back_to_channel')])
     
     if update.callback_query:
         await update.callback_query.edit_message_text(
             text="📅 Выберите дату стрима:",
-            reply_markup=reply_markup
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
         await update.message.reply_text(
             text="📅 Выберите дату стрима:",
-            reply_markup=reply_markup
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
 @catch_errors
 async def handle_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
     query = update.callback_query
@@ -527,11 +452,14 @@ async def handle_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         context.user_data['stream_date'] = selected_date
         
         await query.edit_message_text(
-            text=f"1. Платформа: {get_platform_emoji(context.user_data['platform'])} {context.user_data['platform'].upper()}\n"
+            text=f"1. Платформа: {context.user_data['platform'].capitalize()}\n"
                  f"2. Услуга: {get_service_name(context.user_data['service'])}\n"
                  f"3. Канал: {context.user_data['channel']}\n"
-                 f"4. Дата стрима: {selected_date.split('-')[2]}.{selected_date.split('-')[1]}\n\n"
-                 "🕔 Введите время начала стрима, в формате: 12:00"
+                 f"4. Дата: {selected_date.split('-')[2]}.{selected_date.split('-')[1]}.{selected_date.split('-')[0]}\n\n"
+                 "⏰ Введите время начала стрима (например, 18:30):",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Назад", callback_data='back_to_calendar')]
+            ])
         )
         
         return GET_TIME
@@ -549,21 +477,6 @@ async def handle_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE, da
         
         await show_calendar(update, context, month, year)
 
-def get_platform_emoji(platform):
-    return {
-        'twitch': '🟣',
-        'kick': '🔴',
-        'youtube': '📺'
-    }.get(platform, '')
-
-def get_service_name(service):
-    prices = {
-        'chat_ru': 'Живой чат (RU) - 250 руб/час',
-        'chat_eng': 'Живой чат (ENG) - 400 руб/час',
-        'viewers': 'Зрители - 1 руб/час',
-        'followers': 'Фолловеры - 1 руб/час'
-    }
-    return prices.get(service, service)
 @catch_errors
 async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     time_str = update.message.text
@@ -573,53 +486,191 @@ async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['start_time'] = time_str
         
         await update.message.reply_text(
-            text=f"1. Платформа: {get_platform_emoji(context.user_data['platform'])} {context.user_data['platform'].upper()}\n"
+            text=f"1. Платформа: {context.user_data['platform'].capitalize()}\n"
                  f"2. Услуга: {get_service_name(context.user_data['service'])}\n"
                  f"3. Канал: {context.user_data['channel']}\n"
-                 f"4. Дата стрима: {context.user_data['stream_date'].split('-')[2]}.{context.user_data['stream_date'].split('-')[1]}\n"
-                 f"5. Время начала: {time_str}\n\n"
-                 "⏳ Введите продолжительность стрима в формате: 1:00"
+                 f"4. Дата: {context.user_data['stream_date'].split('-')[2]}.{context.user_data['stream_date'].split('-')[1]}.{context.user_data['stream_date'].split('-')[0]}\n"
+                 f"5. Время: {time_str}\n\n"
+                 "⏳ Введите продолжительность стрима (например, 2:30):",
+            reply_markup=ReplyKeyboardMarkup(
+                [["1:00", "2:00", "3:00"], ["Назад"]],
+                resize_keyboard=True
+            )
         )
         
         return GET_DURATION
     except ValueError:
-        await update.message.reply_text("Пожалуйста, введите время в правильном формате (HH:MM):")
+        await update.message.reply_text("Пожалуйста, введите время в формате ЧЧ:ММ:")
+        return GET_TIME
 
 @catch_errors
 async def get_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration_str = update.message.text
     
     try:
-        datetime.strptime(duration_str, "%H:%M")
+        hours, minutes = map(int, duration_str.split(':'))
+        if hours < 0 or minutes < 0 or minutes >= 60:
+            raise ValueError
+        
         context.user_data['duration'] = duration_str
         
         price_per_hour = get_price(context.user_data['platform'], context.user_data['service'])
-        hours = int(duration_str.split(':')[0]) + int(duration_str.split(':')[1]) / 60
-        amount = round(price_per_hour * hours, 2)
+        total_hours = hours + minutes / 60
+        amount = round(price_per_hour * total_hours, 2)
         context.user_data['amount'] = amount
-        
-        keyboard = [
-            [InlineKeyboardButton("Подтвердить заказ", callback_data='confirm_order')],
-            [InlineKeyboardButton("Отмена", callback_data='back_to_menu')]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
             text=f"📝 Подтвердите заказ:\n\n"
-                 f"Платформа: {get_platform_emoji(context.user_data['platform'])} {context.user_data['platform'].upper()}\n"
-                 f"Услуга: {get_service_name(context.user_data['service'])}\n"
-                 f"Канал: {context.user_data['channel']}\n"
-                 f"Дата стрима: {context.user_data['stream_date'].split('-')[2]}.{context.user_data['stream_date'].split('-')[1]}\n"
-                 f"Время начала: {context.user_data['start_time']}\n"
-                 f"Длительность: {duration_str}\n\n"
+                 f"🔹 Платформа: {context.user_data['platform'].capitalize()}\n"
+                 f"🔹 Услуга: {get_service_name(context.user_data['service'])}\n"
+                 f"🔹 Канал: {context.user_data['channel']}\n"
+                 f"🔹 Дата: {context.user_data['stream_date'].split('-')[2]}.{context.user_data['stream_date'].split('-')[1]}.{context.user_data['stream_date'].split('-')[0]}\n"
+                 f"🔹 Время: {context.user_data['start_time']}\n"
+                 f"🔹 Длительность: {duration_str}\n\n"
                  f"💰 Итого к оплате: {amount} руб",
-            reply_markup=reply_markup
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Подтвердить заказ", callback_data='confirm_order')],
+                [InlineKeyboardButton("❌ Отменить", callback_data='cancel_order')]
+            ])
         )
         
         return CONFIRM_ORDER
     except ValueError:
-        await update.message.reply_text("Пожалуйста, введите длительность в правильном формате (H:MM):")
+        await update.message.reply_text("Пожалуйста, введите длительность в формате Ч:ММ (например, 1:30):")
+        return GET_DURATION
+
+@catch_errors
+async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    order_data = context.user_data
+    order_id = str(uuid.uuid4())[:8]
+    
+    conn = sqlite3.connect('bot.db')
+    cursor = conn.cursor()
+    
+    # Проверяем баланс пользователя
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    balance = cursor.fetchone()[0]
+    
+    if balance >= order_data['amount']:
+        # Создаем заказ
+        cursor.execute(
+            """INSERT INTO orders 
+            (order_id, user_id, platform, service, channel, stream_date, start_time, duration, amount, order_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (order_id, user_id, order_data['platform'], order_data['service'], order_data['channel'],
+             order_data['stream_date'], order_data['start_time'], order_data['duration'], 
+             order_data['amount'], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        
+        # Списание средств
+        cursor.execute(
+            "UPDATE users SET balance = balance - ? WHERE user_id = ?",
+            (order_data['amount'], user_id))
+        
+        conn.commit()
+        
+        await query.edit_message_text(
+            text=f"🎉 Заказ #{order_id} успешно создан!\n\n"
+                 f"С вашего баланса списано {order_data['amount']} руб.\n"
+                 f"Новый баланс: {balance - order_data['amount']:.2f} руб\n\n"
+                 "Спасибо за заказ!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("В меню", callback_data='back_to_menu')]
+            ])
+        )
+    else:
+        await query.edit_message_text(
+            text=f"⚠️ Недостаточно средств на балансе!\n\n"
+                 f"Требуется: {order_data['amount']} руб\n"
+                 f"Ваш баланс: {balance:.2f} руб\n\n"
+                 "Пополните баланс для завершения заказа.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Пополнить баланс", callback_data='topup_balance')],
+                [InlineKeyboardButton("Отменить заказ", callback_data='cancel_order')]
+            ])
+        )
+    
+    conn.close()
+    return ConversationHandler.END
+
+@catch_errors
+async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await start(update, context)
+    return ConversationHandler.END
+
+@catch_errors
+async def back_to_platforms(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await choose_platform(update, context)
+    return ConversationHandler.END
+
+@catch_errors
+async def back_to_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await get_platform(update, context)
+    return GET_CHANNEL
+
+@catch_errors
+async def back_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await ask_channel(update, context)
+    return GET_CHANNEL
+
+@catch_errors
+async def back_to_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await show_calendar(update, context)
+    return GET_DATE
+
+@catch_errors
+async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        text="Заказ отменен.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("В меню", callback_data='back_to_menu')]
+        ])
+    )
+    return ConversationHandler.END
+
+@catch_errors
+async def cancel_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        text="Пополнение баланса отменено.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("В меню", callback_data='back_to_menu')]
+        ])
+    )
+    return ConversationHandler.END
+
+def get_service_name(service):
+    services = {
+        'chat_ru': 'Чат (RU)',
+        'chat_eng': 'Чат (ENG)',
+        'viewers': 'Зрители',
+        'followers': 'Подписчики'
+    }
+    return services.get(service, service)
 
 def get_price(platform, service):
     prices = {
@@ -628,218 +679,78 @@ def get_price(platform, service):
         'youtube': {'chat_ru': 319, 'chat_eng': 419, 'viewers': 1, 'followers': 1}
     }
     return prices.get(platform, {}).get(service, 0)
-@catch_errors
-async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    keyboard = [
-        [InlineKeyboardButton("Оплатить криптовалютой (CryptoBot)", callback_data='pay_crypto')],
-        [InlineKeyboardButton("Оплатить картой", callback_data='pay_card')],
-        [InlineKeyboardButton("Отмена", callback_data='back_to_menu')]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text="💰 Выберите способ оплаты:",
-        reply_markup=reply_markup
-    )
 
-@catch_errors
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    if not is_admin(query.from_user.id):
-        await query.answer("У вас нет прав доступа к этой функции!")
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("Статистика пользователей", callback_data='admin_stats')],
-        [InlineKeyboardButton("Просмотр заказов", callback_data='admin_orders')],
-        [InlineKeyboardButton("Изменить баланс пользователя", callback_data='admin_balance')],
-        [InlineKeyboardButton("Назад", callback_data='back_to_menu')]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text="⚙️ Админ панель\n\nВыберите действие:",
-        reply_markup=reply_markup
-    )
-
-@catch_errors
-async def handle_admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
-    if data == 'admin_stats':
-        await show_admin_stats(update, context)
-    elif data == 'admin_orders':
-        await show_admin_orders(update, context)
-    elif data == 'admin_balance':
-        await ask_user_for_balance_change(update, context)
-@catch_errors
-async def show_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    
-    today = datetime.now().strftime("%Y-%m-%d")
-    cursor.execute("SELECT COUNT(*) FROM users WHERE date(registration_date) = ?", (today,))
-    new_users_today = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM orders")
-    total_orders = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM orders WHERE date(order_date) = ?", (today,))
-    orders_today = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT SUM(amount) FROM orders WHERE status = 'completed'")
-    total_sales = cursor.fetchone()[0] or 0
-    
-    conn.close()
-    
-    keyboard = [[InlineKeyboardButton("Назад", callback_data='admin_panel')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text=f"📊 Статистика:\n\n"
-             f"👥 Всего пользователей: {total_users}\n"
-             f"🆕 Новых сегодня: {new_users_today}\n\n"
-             f"🛒 Всего заказов: {total_orders}\n"
-             f"📦 Заказов сегодня: {orders_today}\n\n"
-             f"💰 Общий объем продаж: {total_sales} руб",
-        reply_markup=reply_markup
-    )
-
-@catch_errors
-async def show_admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT o.order_id, u.username, o.platform, o.service, o.amount, o.status 
-        FROM orders o
-        JOIN users u ON o.user_id = u.user_id
-        ORDER BY o.order_date DESC
-        LIMIT 10
-    """)
-    
-    orders = cursor.fetchall()
-    conn.close()
-    
-    if not orders:
-        text = "Нет заказов для отображения."
-    else:
-        text = "📦 Последние заказы:\n\n"
-        for order in orders:
-            order_id, username, platform, service, amount, status = order
-            status_emoji = "✅" if status == "completed" else "🕒" if status == "pending" else "❌"
-            text += (f"{status_emoji} Заказ #{order_id}\n"
-                    f"👤 {username}\n"
-                    f"🛒 {platform.upper()} - {service}\n"
-                    f"💰 {amount} руб\n\n")
-    
-    keyboard = [[InlineKeyboardButton("Назад", callback_data='admin_panel')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text=text,
-        reply_markup=reply_markup
-    )
-@catch_errors
-async def ask_user_for_balance_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    
-    await query.edit_message_text(
-        text="Введите ID пользователя и сумму изменения (например: 123456789 +500):"
-    )
-    
-    return ADMIN_BALANCE_CHANGE
-
-@catch_errors
-async def admin_balance_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    
-    try:
-        parts = text.split()
-        user_id = int(parts[0])
-        amount_change = float(parts[1])
-        
-        conn = sqlite3.connect('bot.db')
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        
-        if not result:
-            await update.message.reply_text("Пользователь не найден!")
-            return
-        
-        current_balance = result[0]
-        new_balance = current_balance + amount_change
-        
-        cursor.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
-        conn.commit()
-        conn.close()
-        
-        await update.message.reply_text(
-            f"Баланс пользователя {user_id} изменен:\n"
-            f"Старый баланс: {current_balance} руб\n"
-            f"Изменение: {'+' if amount_change >= 0 else ''}{amount_change} руб\n"
-            f"Новый баланс: {new_balance} руб"
-        )
-        
-        return ConversationHandler.END
-    except (ValueError, IndexError):
-        await update.message.reply_text("Неверный формат. Введите ID пользователя и сумму изменения (например: 123456789 +500):")
-
-from flask import Flask
-import threading
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
-import logging
-import os
-
-# Запуск простого Flask-сервера
-def run_web_server():
-    app = Flask(__name__)
-
-    @app.route('/')
-    def index():
-        return "Бот работает!"
-
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
-def run_bot():
-    threading.Thread(target=run_web_server).start()
-
+def main():
     init_db()
-
-    application = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .build()
-    )
-
+    
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Обработчики команд
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button))
-
+    
+    # Обработчики сообщений
+    application.add_handler(MessageHandler(filters.Text(["Мой профиль"]), show_profile))
+    application.add_handler(MessageHandler(filters.Text(["Помощь"]), show_help))
+    application.add_handler(MessageHandler(filters.Text(["Сделать заказ"]), choose_platform))
+    application.add_handler(MessageHandler(filters.Text(["Пополнить баланс"]), topup_balance))
+    application.add_handler(MessageHandler(filters.Text(["Назад в меню"]), back_to_menu))
+    application.add_handler(MessageHandler(filters.Text(["Twitch", "YouTube", "Kick"]), get_platform))
+    
+    # Обработчики callback-запросов
+    application.add_handler(CallbackQueryHandler(process_crypto_payment, pattern='^pay_crypto$'))
+    application.add_handler(CallbackQueryHandler(back_to_menu, pattern='^back_to_menu$'))
+    application.add_handler(CallbackQueryHandler(back_to_platforms, pattern='^back_to_platforms$'))
+    application.add_handler(CallbackQueryHandler(back_to_services, pattern='^back_to_services$'))
+    application.add_handler(CallbackQueryHandler(back_to_channel, pattern='^back_to_channel$'))
+    application.add_handler(CallbackQueryHandler(back_to_calendar, pattern='^back_to_calendar$'))
+    application.add_handler(CallbackQueryHandler(cancel_order, pattern='^cancel_order$'))
+    application.add_handler(CallbackQueryHandler(cancel_payment, pattern='^cancel_payment$'))
+    
+    # Conversation handler для пополнения баланса
+    topup_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Text(["Пополнить баланс"]), topup_balance)],
+        states={
+            GET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_amount)],
+            CONFIRM_ORDER: [CallbackQueryHandler(process_crypto_payment, pattern='^pay_crypto$')]
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_payment, pattern='^cancel_payment$'),
+            CommandHandler("start", start)
+        ]
+    )
+    application.add_handler(topup_conv)
+    
+    # Conversation handler для создания заказа
+    order_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Text(["Twitch", "YouTube", "Kick"]), get_platform)],
+        states={
+            GET_CHANNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_channel)],
+            GET_DATE: [CallbackQueryHandler(handle_calendar, pattern='^calendar_')],
+            GET_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
+            GET_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_duration)],
+            CONFIRM_ORDER: [CallbackQueryHandler(confirm_order, pattern='^confirm_order$')]
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_order, pattern='^cancel_order$'),
+            CommandHandler("start", start)
+        ],
+        allow_reentry=True
+    )
+    application.add_handler(order_conv)
+    
+    # Планировщик задач
     application.job_queue.run_repeating(
         check_pending_payments,
         interval=PAYMENT_CHECK_INTERVAL,
         first=10
     )
     application.job_queue.run_repeating(
-        keep_alive,
-        interval=KEEP_ALIVE_INTERVAL,
-        first=10
+        get_usdt_rate,
+        interval=3600,  # Обновляем курс каждый час
+        first=5
     )
-
-    application.run_polling()
     
+    application.run_polling()
+
 if __name__ == '__main__':
-    run_bot()
+    main()
