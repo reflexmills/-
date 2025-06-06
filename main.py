@@ -242,7 +242,7 @@ async def keep_alive(context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO system (key, value) VALUES (?, ?)",
-            ('last_activity', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            ('last_activity', datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit()
         conn.close()
     except Exception as e:
