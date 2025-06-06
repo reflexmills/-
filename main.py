@@ -799,7 +799,11 @@ async def admin_balance_change(update: Update, context: ContextTypes.DEFAULT_TYP
 
 from flask import Flask
 import threading
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+import logging
+import os
 
+# Запуск простого Flask-сервера
 def run_web_server():
     app = Flask(__name__)
 
@@ -810,7 +814,21 @@ def run_web_server():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
-async def main():
+def run_bot():
+    from handlers import start, button  # или импортируй то, что тебе нужно
+
+    from config import (
+        TELEGRAM_TOKEN,
+        init_db,
+        check_pending_payments,
+        keep_alive,
+        PAYMENT_CHECK_INTERVAL,
+        KEEP_ALIVE_INTERVAL,
+    )
+
+    # Запускаем Flask в отдельном потоке
+    threading.Thread(target=run_web_server).start()
+
     init_db()
 
     application = (
@@ -819,37 +837,16 @@ async def main():
         .build()
     )
 
+    # Обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button))
 
-    application.job_queue.run_repeating(
-        check_pending_payments,
-        interval=PAYMENT_CHECK_INTERVAL,
-        first=10
-    )
-    application.job_queue.run_repeating(
-        keep_alive,
-        interval=KEEP_ALIVE_INTERVAL,
-        first=10
-    )
+    # Планировщик
+    application.job_queue.run_repeating(check_pending_payments, interval=PAYMENT_CHECK_INTERVAL, first=10)
+    application.job_queue.run_repeating(keep_alive, interval=KEEP_ALIVE_INTERVAL, first=10)
 
-    try:
-        await application.run_polling()
-    finally:
-        await application.stop()
-
-def run_bot():
-    # Запускаем фейковый веб-сервер, чтобы Render видел открытый порт
-    threading.Thread(target=run_web_server).start()
-
-    while True:
-        try:
-            asyncio.run(main())
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            logging.critical(f"Ошибка: {e}")
-            time.sleep(RESTART_DELAY)
+    # ⛔️ ВНИМАНИЕ: НЕ используем asyncio.run() или await
+    application.run_polling()
 
 if __name__ == '__main__':
     run_bot()
