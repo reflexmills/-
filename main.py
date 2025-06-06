@@ -11,6 +11,7 @@ from telegram.ext import (
 )
 from datetime import datetime, timedelta
 from calendar import monthrange
+from telegram.ext import JobQueue
 import sqlite3
 import uuid
 import requests
@@ -792,16 +793,22 @@ async def admin_balance_change(update: Update, context: ContextTypes.DEFAULT_TYP
     except (ValueError, IndexError):
         await update.message.reply_text("Неверный формат. Введите ID пользователя и сумму изменения (например: 123456789 +500):")
 async def main():
-
+    """Основная функция запуска бота"""
     init_db()
     
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Инициализация с JobQueue
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .job_queue(JobQueue())  # Явное создание JobQueue
+        .build()
+    )
     
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button))
     
-    # ConversationHandler для многошаговых взаимодействий
+    # ConversationHandler
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(button)],
         states={
@@ -817,14 +824,20 @@ async def main():
     application.add_handler(conv_handler)
     
     # Настройка периодических задач
-    job_queue = application.job_queue
-    if job_queue:
-        job_queue.run_repeating(check_pending_payments, interval=PAYMENT_CHECK_INTERVAL, first=10)
-        job_queue.run_repeating(keep_alive, interval=KEEP_ALIVE_INTERVAL, first=10)
+    if application.job_queue:
+        application.job_queue.run_repeating(
+            check_pending_payments,
+            interval=PAYMENT_CHECK_INTERVAL,
+            first=10
+        )
+        application.job_queue.run_repeating(
+            keep_alive,
+            interval=KEEP_ALIVE_INTERVAL,
+            first=10
+        )
     
-    # Запуск бота
     await application.run_polling()
-
+    
 if __name__ == '__main__':
     while True:
         try:
