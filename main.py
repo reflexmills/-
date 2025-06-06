@@ -708,7 +708,7 @@ def find_free_port():
 
 def run_web_server():
     """Запуск Flask-сервера для Render с автоматическим выбором свободного порта"""
-    app = Flask(name)
+    app = Flask(__name__)
 
     @app.route('/')
     def home():
