@@ -707,7 +707,7 @@ def find_free_port():
                 port += 1
 
 def run_web_server():
-    """Запуск Flask-сервера для Render с автоматическим выбором свободного порта"""
+    """Запуск Flask-сервера для Render"""
     app = Flask(__name__)
 
     @app.route('/')
@@ -722,10 +722,9 @@ def run_web_server():
         conn.close()
         return "OK", 200
 
-    port = find_free_port()
-    print(f"Starting server on port {port}")  # Для отладки
+    port = int(os.environ.get("PORT", 11111))
     app.run(host="0.0.0.0", port=port)
-
+    
 def main():
     """Основная функция запуска бота"""
     # Инициализация базы данных
