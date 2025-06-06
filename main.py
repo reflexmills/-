@@ -706,8 +706,24 @@ def find_free_port():
             except OSError:
                 port += 1
 
+import socket
+import sqlite3
+from flask import Flask
+import os
+
+def find_free_port(start_port=2500, max_port=65535):
+    """Находит свободный порт в заданном диапазоне"""
+    for port in range(start_port, max_port + 1):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('0.0.0.0', port))
+                return port
+            except OSError:
+                continue
+    raise IOError("No free ports available in the specified range")
+
 def run_web_server():
-    """Запуск Flask-сервера для Render"""
+    """Запуск Flask-сервера"""
     app = Flask(__name__)
 
     @app.route('/')
@@ -716,13 +732,16 @@ def run_web_server():
 
     @app.route('/health')
     def health():
-        conn = sqlite3.connect('bot.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        conn.close()
-        return "OK", 200
+        try:
+            conn = sqlite3.connect('bot.db')
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            conn.close()
+            return "OK", 200
+        except Exception as e:
+            return f"DB Error: {str(e)}", 500
 
-    port = int(os.environ.get("PORT", 49979))
+    port = int(os.environ.get("PORT", find_free_port()))
     app.run(host="0.0.0.0", port=port)
     
 def main():
