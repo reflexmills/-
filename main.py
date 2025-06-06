@@ -839,7 +839,7 @@ conv_handler = ConversationHandler(
 application.add_handler(conv_handler)
     
     # Регистрация обработчика кнопок
-    application.add_handler(CallbackQueryHandler(button))
+application.add_handler(CallbackQueryHandler(button))
     
     # Настройка периодических задач
     application.job_queue.run_repeating(
