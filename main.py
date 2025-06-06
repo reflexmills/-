@@ -857,5 +857,5 @@ def run_bot():
             logging.info(f"Перезапуск через {RESTART_DELAY} сек...")
             time.sleep(RESTART_DELAY)
 
-if name == 'main':
+if __name__ == '__main__':
     run_bot()
