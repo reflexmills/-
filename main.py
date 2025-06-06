@@ -12,6 +12,8 @@ from telegram.ext import (
 from datetime import datetime, timedelta
 from calendar import monthrange
 from telegram.ext import JobQueue
+from flask import Flask
+import threading
 import sqlite3
 import uuid
 import requests
@@ -794,6 +796,17 @@ async def admin_balance_change(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
     except (ValueError, IndexError):
         await update.message.reply_text("Неверный формат. Введите ID пользователя и сумму изменения (например: 123456789 +500):")
+
+def run_web_server():
+    app = Flask(name)
+
+    @app.route('/')
+    def index():
+        return "Бот работает!"
+
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+    
 async def main():
     init_db()
     
