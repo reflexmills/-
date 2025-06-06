@@ -146,7 +146,7 @@ def init_db():
     # Инициализация системных настроек
     cursor.execute(
         "INSERT OR IGNORE INTO system (key, value) VALUES ('last_restart', ?)",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),)
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
     
     conn.commit()
     conn.close()
