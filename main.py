@@ -19,6 +19,8 @@ import json
 import time
 import sys
 import os
+import asyncio
+from telegram.ext import Application, JobQueue
 from functools import wraps
 from dotenv import load_dotenv
 
@@ -807,7 +809,7 @@ async def main():
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     
-  conv_handler = ConversationHandler(
+conv_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
         GET_CHANNEL: [
