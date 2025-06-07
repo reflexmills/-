@@ -1308,7 +1308,7 @@ def kill_process_on_port(port):
 
 def run_web_server():
     """Запуск Flask-сервера для Render с принудительным освобождением порта"""
-    app = Flask(name)
+    app = Flask(__name__)
 
     @app.route('/')
     def home():
