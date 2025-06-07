@@ -1286,68 +1286,20 @@ async def admin_set_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ADMIN_BALANCE_CHANGE
 
-import os
-import socket
-import sys
-from flask import Flask
-import psutil
-import signal
-
-def kill_process_on_port(port):
-    """Находит и завершает процесс, занимающий указанный порт"""
-    for proc in psutil.process_iter(['pid', 'name', 'connections']):
-        try:
-            for conn in proc.connections():
-                if conn.laddr.port == port:
-                    print(f"Найден процесс {proc.pid} на порту {port}, завершаю...")
-                    os.kill(proc.pid, signal.SIGTERM)
-                    return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, AttributeError):
-            continue
-    return False
-
 def run_web_server():
-    """Запуск Flask-сервера для Render с принудительным освобождением порта"""
     app = Flask(__name__)
-
-    @app.route('/')
-    def home():
-        return "Telegram Bot is running!", 200
-
-    @app.route('/health')
-    def health():
-        try:
-            load_data()
-            return "OK", 200
-        except Exception as e:
-            return f"Error: {str(e)}", 500
-
+    
+    # ... маршруты ...
+    
     port = int(os.environ.get("PORT", 8000))
     
-    # Попытка освободить порт
-    if kill_process_on_port(port):
-        print(f"Процесс на порту {port} был завершен")
-    
     try:
-        # Проверка доступности порта
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('0.0.0.0', port))
-        
-        # Если порт свободен, запускаем сервер
-        print(f"Запуск сервера на порту {port}")
         app.run(host='0.0.0.0', port=port)
-        
-    except OSError as e:
-        print(f"Ошибка: {e}")
-        print("Попытка завершить конфликтующий процесс...")
-        
-        if kill_process_on_port(port):
-            print("Повторная попытка запуска сервера...")
-            app.run(host='0.0.0.0', port=port)
-        else:
-            print("Не удалось освободить порт. Используйте другой порт.")
-            sys.exit(1)
-
+    except OSError:
+        # Если порт занят (например, при горячей перезагрузке)
+        port = random.randint(8001, 8999)
+        print(f"Порт занят, пробую {port}")
+        app.run(host='0.0.0.0', port=port)
 # =============================================
 # ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА
 # =============================================
