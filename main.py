@@ -1290,25 +1290,6 @@ async def admin_set_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ЗАПУСК ВЕБ-СЕРВЕРА ДЛЯ KOYEB
 # =============================================
 
-def run_web_server():
-    """Запуск Flask-сервера для Koyeb"""
-    app = Flask(__name__)
-
-    @app.route('/')
-    def home():
-        return "Telegram Bot is running!", 200
-
-    @app.route('/health')
-    def health():
-        try:
-            load_data()  # Просто проверяем доступность файла данных
-            return "OK", 200
-        except Exception as e:
-            return f"Error: {str(e)}", 500
-
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
-
 # =============================================
 # ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА
 # =============================================
