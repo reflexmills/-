@@ -837,21 +837,14 @@ async def back_to_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @catch_errors
 async def get_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка введенного канала"""
+    """Обработка ввода канала пользователем"""
     channel = update.message.text.strip()
-    
-    # Простая валидация канала
-    if not channel or len(channel) > 100:
-        await update.message.reply_text(
-            "Пожалуйста, введите корректный юзернейм или ссылку (макс. 100 символов):",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Назад", callback_data='back_to_services')]
-            ])
-        )
+    if not channel:
+        await update.message.reply_text("Пожалуйста, введите название канала")
         return GET_CHANNEL
     
     context.user_data['channel'] = channel
-    await show_calendar(update, context)
+    await show_calendar(update, context)  # Убедитесь, что эта функция определена
     return GET_DATE
 
 async def show_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
