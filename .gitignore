@@ -1,2 +1,19 @@
+# Файлы данных
+data.json
+bot.log
+
+# Переменные окружения
 .env
-.env.*
+
+# Питон
+pycache/
+*.py[cod]
+*$py.class
+
+# IDE
+.idea/
+.vscode/
+
+# Системные
+.DS_Store
+Thumbs.db
