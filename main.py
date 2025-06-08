@@ -1284,7 +1284,7 @@ from flask import Flask
 import sys
 
 def run_web_server():
-    app = Flask(name)
+    app = Flask(__name__)
     
     # ... ваши маршруты ...
     
