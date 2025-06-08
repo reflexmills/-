@@ -1279,20 +1279,24 @@ async def admin_set_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ADMIN_BALANCE_CHANGE
 
+import os
+from flask import Flask
+import sys
+
 def run_web_server():
-    app = Flask(__name__)
+    app = Flask(name)
     
-    # ... маршруты ...
+    # ... ваши маршруты ...
     
-    port = int(os.environ.get("PORT", 8000))
+    # Жёстко задаём порт 8080 (игнорируя переменную окружения PORT)
+    port = 8080
     
     try:
         app.run(host='0.0.0.0', port=port)
-    except OSError:
-        # Если порт занят (например, при горячей перезагрузке)
-        port = random.randint(8001, 8999)
-        print(f"Порт занят, пробую {port}")
-        app.run(host='0.0.0.0', port=port)
+    except OSError as e:
+        print(f"Ошибка: порт {port} занят! Сервер не запущен.", file=sys.stderr)
+        print("Закройте программу, использующую порт 8080, и попробуйте снова.", file=sys.stderr)
+        sys.exit(1)  # Завершаем программу с кодом ошибки
 # =============================================
 # ОСНОВНАЯ ФУНКЦИЯ ЗАПУСКА
 # =============================================
